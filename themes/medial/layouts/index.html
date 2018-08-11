@@ -1,0 +1,18 @@
+{{ partial "header" . }}
+
+<main>
+
+    <div class="intro">
+        
+        
+        <a href="{{ .Site.Params.homeImageLink }}"><img src="{{ .Site.Params.homeImage }}"></a>
+
+        <h2>{{ .Site.Title }}</h2>
+
+        <h4>{{ markdownify .Site.Params.Description }}</h4>
+
+    </div>
+
+</main>
+
+{{ partial "footer" . }}
