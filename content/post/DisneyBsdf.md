@@ -227,9 +227,18 @@ with $\ht = -\frac{\i + \eta\o}{||i + \eta\o||}$ and $\eta = \frac{\eta\_i}{\eta
 
 Other than that, the BSDF uses the same distribution and geometry terms as the BRDF. They model the full dielectric Fresnel equation for this since they ran into issues where the relative IOR was close to 1. My implementation for Fresnel::Dielectric is just copied from PBRT so I'll link that [here](https://github.com/mmp/pbrt-v3/blob/master/src/core/reflection.cpp) rather than inline the code.
 
-Finally, when using the thin material model we use the square root of the base color to model both the entrance and the exit event at the same time.
+Finally, when using the thin material model we use the square root of the base color to model both the entrance and the exit event at the same time. We also adjust the anisotropic roughness parameters based on the index of refraction which is handled outside of EvaluateDisneySpecTransmission.
 
 ~~~
+//===================================================================================================================
+static float ThinTransmissionRoughness(float ior, float roughness)
+{
+    // -- Disney scales by (.65 * eta - .35) based on figure 15 of the 2015 PBR course notes. Based on their figure
+    // -- the results match a geometrically thin solid fairly well but it is odd to me that roughness is decreased
+    // -- until an IOR of just over 2.
+    return Saturate((0.65f * ior - 0.35f) * roughness);
+}
+
 //===================================================================================================================
 static float3 EvaluateDisneySpecTransmission(const SurfaceParameters& surface, const float3& wo, const float3& wm,
                                              const float3& wi, float ax, float ay, bool thin)
@@ -475,7 +484,147 @@ static void CalculateLobePdfs(const SurfaceParameters& surface,
 }
 ~~~
 
-And now sampling is relatively straightforward. [I already wrote a blog post about sampling the specular BRDF](https://schuttejoe.github.io/post/ggximportancesamplingpart2/) and sampling a cosine weighted hemisphere is sufficient for sampling the diffuse BRDF. That leaves clearcoat for which Burley gave the equation for sampling the distribution of normals in the 2012 addendum:
+And now sampling is relatively straightforward. [I already wrote a blog post about sampling the specular BRDF](https://schuttejoe.github.io/post/ggximportancesamplingpart2/) though some care needs to be taken when using the thin material mode.
+
+~~~
+//===================================================================================================================
+static void SampleDisneySpecTransmission(CSampler* sampler, const SurfaceParameters& surface, float3 v, bool thin,
+                                         BsdfSample& sample)
+{
+    float3 wo = MatrixMultiply(v, surface.worldToTangent);
+
+    // -- Scale roughness based on IOR
+    float rscaled = thin ? ThinTransmissionRoughness(surface.ior, surface.roughness) : surface.roughness;
+     
+    float tax, tay;
+    CalculateAnisotropicParams(rscaled, surface.anisotropic, tax, tay);
+    
+    // -- Sample visible distribution of normals
+    float r0 = sampler->UniformFloat();
+    float r1 = sampler->UniformFloat();
+    float3 wm = Bsdf::SampleGgxVndfAnisotropic(wo, tax, tay, r0, r1);
+
+    float dotVH = Absf(Dot(wo, wm));
+
+    // -- Disney uses the full dielectric Fresnel equation for transmission. We also importance sample F to
+    // -- switch between refraction and reflection at glancing angles.
+    float F = Fresnel::Dielectric(dotVH, 1.0f, 1.0f / surface.relativeIOR);
+    float scatterPdf;
+    float3 surfaceColor;
+
+    SurfaceEventTypes eventType = SurfaceEventTypes::eScatterEvent;
+
+    float3 wi;
+    if(sampler->UniformFloat() < F) {
+        wi = Reflect(wm, wo);
+        scatterPdf = F;
+        surfaceColor = surface.baseColor;
+    }
+    else {
+        if(thin) {
+            // -- When the surface is thin so it refracts into and then out of the surface during this shading
+            // -- event. So the ray is just reflected then flipped and we use the sqrt of the surface color.
+            wi = Reflect(wm, wo);
+            wi.y = -wi.y;
+            surfaceColor = Sqrt(surface.baseColor);
+        }
+        else {
+            surfaceColor = surface.baseColor;
+
+            if(Transmit(wm, wo, surface.relativeIOR, wi)) {
+                eventType = SurfaceEventTypes::eTransmissionEvent;
+
+                sample.medium.phaseFunction = MediumPhaseFunction::eIsotropic;
+                sample.medium.extinction = CalculateExtinction(surface.transmittanceColor, surface.scatterDistance);
+            }
+            else {
+                wi = Reflect(wm, wo);
+            }
+        }
+
+        // -- pdf for importance sampling the fresnel term
+        scatterPdf = 1.0f - F;
+    }
+    wi = Normalize(wi);
+
+    // -- Since we're sampling the distribution of visible normals the pdf cancels out with a number of other terms.
+    // -- We are left with the weight G2(wi, wo, wm) / G1(wi, wm) and since Disney uses a separable masking function
+    // -- we get G1(wi, wm) * G1(wo, wm) / G1(wi, wm) = G1(wo, wm) as our weight.
+    float G1v = Bsdf::SeparableSmithGGXG1(wo, wm, tax, tay);
+    sample.reflectance = surfaceColor * G1v;
+
+    // -- calculate pdf terms
+    Bsdf::GgxVndfAnisotropicPdf(wi, wm, wo, tax, tay, sample.forwardPdfW, sample.reversePdfW);
+    sample.forwardPdfW /= scatterPdf;
+    sample.reversePdfW /= scatterPdf;
+
+    // -- convert wi back to world space
+    sample.wi = Normalize(MatrixMultiply(wi, MatrixTranspose(surface.worldToTangent)));
+
+    // -- Since this is a thin surface we are not ending up inside of a volume so we treat this as a scatter event.
+    sample.type = eventType;
+}
+~~~
+
+Sampling a cosine weighted hemisphere is sufficient for sampling the diffuse BRDF. We do need to handle Disney's _diffTrans_ parameter for switching between reflection and transmission here so we importance sample that. Additionally, care must be taken to handle thin surfaces.
+
+~~~
+//===================================================================================================================
+static void SampleDisneyDiffuse(CSampler* sampler, const SurfaceParameters& surface, float3 v, bool thin,
+                                BsdfSample& sample)
+{
+    float3 wo = MatrixMultiply(v, surface.worldToTangent);
+
+    float sign = Sign(CosTheta(wo));
+
+    // -- Sample cosine lobe
+    float r0 = sampler->UniformFloat();
+    float r1 = sampler->UniformFloat();
+    float3 wi = sign * SampleCosineWeightedHemisphere(r0, r1);
+    float3 wm = Normalize(wi + wo);
+
+    float dotNL = CosTheta(wi);
+    float dotNV = CosTheta(wo);
+    float absDotHL = Dot(wm, wo);
+
+    float pdf;
+
+    SurfaceEventTypes eventType = SurfaceEventTypes::eScatterEvent;
+
+    float3 color = surface.baseColor;
+
+    float p = sampler->UniformFloat();
+    if(p < surface.diffTrans) {
+        wi = -wi;
+        pdf = surface.diffTrans;
+
+        if(thin)
+            color = Sqrt(color);
+        else {
+            eventType = SurfaceEventTypes::eTransmissionEvent;
+
+            sample.medium.phaseFunction = MediumPhaseFunction::eIsotropic;
+            sample.medium.extinction = CalculateExtinction(surface.transmittanceColor, surface.scatterDistance);
+        }
+    }
+    else {
+        pdf = (1.0f - surface.diffTrans);
+    }
+
+    float3 sheen = EvaluateSheen(surface, wo, wm, wi);
+    sample.reflectance = sheen;
+
+    float diffuse = EvaluateDisneyDiffuse(surface, wo, wm, wi, thin);
+
+    sample.reflectance += color * (diffuse / pdf) * Absf(dotNL);
+    sample.wi = Normalize(MatrixMultiply(wi, MatrixTranspose(surface.worldToTangent)));
+    sample.forwardPdfW = Absf(dotNL) / pdf;
+    sample.reversePdfW = Absf(dotNV) / pdf;
+    sample.type = eventType;
+}
+~~~
+
+That leaves clearcoat for which Burley gave the equation for sampling the distribution of normals in the 2012 addendum:
 
 $$cos(\theta\_h) = \sqrt{\frac{1 - \xi\_2}{1 + (\alpha^2 - 1)\xi\_2}}$$
 
