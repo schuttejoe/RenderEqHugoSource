@@ -19,16 +19,15 @@ $\newcommand{\ht}{\\textit{h}\_t}$
 Preprint
 ---
 
-Consider this to be a preprint. I haven't shared this on social media yet since I want to iterate a bit more on this before I do so. I plan to broadcast this more once I have the full island scene rendering and have verified my results against other renderers.
+I believe this to be complete and correct but I want to validate my results on the Moana Island Scene assets before I share this on social media and risk misleading someone. I'll also add some better images for the "final" version.
 
 ---
 Intro
 ---
-While the subject of this post has been covered before in other blogs from what I've seen I believe this is the most comprehensive post so if you're trying to implement the Disney BSDF this will hopefully be a valuable reference that mentions some details that others have left out. Also, source code is always a win.
 
 The Disney BRDF was introduced by Brent Burley as part of the [SIGGRAPH 2012 Physically Based Shading course](http://blog.selfshadow.com/publications/s2012-shading-course/) and then extended to a BSDF with integrated subsurface scattering for the [SIGGRAPH 2015 Physically Based Shading course](http://blog.selfshadow.com/publications/s2015-shading-course/). While the model is not strictly physically based it was designed with physically based principles in mind and each of the terms included was done so to fit the model to materials in the MERL 100 database. More importantly, each term was carefully chosen and parameterized to be easy for artists to use and so that blending multiple layers together would give intuitive results. I believe it is these later traits that have made the Disney BSDF to be so successful.
 
-The materials in the Moana Island scene are all one of two types: "solid" or "thin". Both material types generally behave the same with the exception being when transmission is involved. For thin materials there is no internal surface to apply subsurface scattering with so it is approximated with Hanrahan-Krueger diffuse. Additionally, since there is also no volume to refract into and later out of both the enter and exit events are modeled simultaneously at the same point. The most common example of this material type in the Island scene is for leaves and other foliage modeled without an interior volume. It would then make sense to guess that the solid material type is for objects that are modeled with an interior volume.
+The materials in the Moana Island scene are all one of two types: "solid" or "thin". Both material types generally behave the same with the exception being when transmission is involved. For thin materials there is no internal surface so subsurface scattering is approximated with Hanrahan-Krueger diffuse. Additionally, since there is also no volume to refract into and later out of both the enter and exit events are modeled simultaneously at the same point. The most common example of this material type in the Island scene is for leaves and other foliage modeled without an interior volume. It would then make sense to guess that the solid material type is for objects that are modeled with an interior volume.
 
 The title of my blog (Rendering Equations) wouldn't be a bad pun for giving you a bunch of equations if I didn't include a whole bunch of equations in each post. So next I'll describe each individual lobe of the Disney BSDF and then I'll wrap up by discussing sampling of each lobe.
 
@@ -79,7 +78,7 @@ The distribution term used for the clearcoat layer is a fixed form of a BRDF cre
 
 $$D\_{GTR\_1}(x) = \frac{\alpha^2 - 1}{\pi\log(\alpha^2)} \frac{1}{1 + (\alpha^2 - 1)\cos^2\theta\_h}$$
 
-The Fresnel term uses the Schlick approximation with a fixed index of refraction of 1.5 to be representative of polyurethane. This evaluates to $F\_0 = 0.04$.
+The Fresnel term uses the Schlick approximation with a fixed index of refraction of 1.5 to be representative of polyurethane. This evaluates to $F\_0 = 0.04$. If you want details on how that is calculated Sébastien Lagarde [wrote about the Fresnel equation in a ton of detail.](https://seblagarde.wordpress.com/2013/04/29/memo-on-fresnel-equations/)
 
 $$f\_{Schlick} = F\_0 + (1 - F\_0)(1 - \cos\theta\_h)^5$$
 
@@ -89,6 +88,27 @@ $$G(\theta, \alpha) = \frac{1}{\cos\theta + \sqrt{\alpha^2 + \cos\theta - \alpha
 $$G(\theta\_l, \theta\_v) = G(\theta\_l, 0.25) * G(\theta\_v, 0.25)$$
 
 ~~~~
+//===================================================================================================================
+static float GTR1(float absDotHL, float a)
+{
+    if(a >= 1) {
+        return InvPi_;
+    }
+
+    float a2 = a * a;
+    return (a2 - 1.0f) / (Pi_ * Log2(a2) * (1.0f + (a2 - 1.0f) * absDotHL * absDotHL));
+}
+
+//===================================================================================================================
+float SeparableSmithGGXG1(const float3& w, float a)
+{
+    float a2 = a * a;
+    float absDotNV = AbsCosTheta(w);
+
+    return 2.0f / (1.0f + Math::Sqrtf(a2 + (1 - a2) * absDotNV * absDotNV));
+}
+
+//===================================================================================================================
 static float EvaluateDisneyClearcoat(float clearcoat, float alpha, const float3& wo, const float3& wm,
                                      const float3& wi, float& fPdfW, float& rPdfW)
 {
@@ -117,7 +137,7 @@ static float EvaluateDisneyClearcoat(float clearcoat, float alpha, const float3&
 Specular BRDF
 ---
 
-The specular BRDF is the traditional Cook-Torrance microfacet BRDF that uses Anisotropic GGX (aka GTR2) with the Schlick Fresnel approximation and the Smith masking-shadowing function. Burley calculated the anisotropic weights $\alpha\_x$ and $\alpha\_y$ with:
+The specular BRDF is the traditional Cook-Torrance microfacet BRDF that uses Anisotropic GGX (aka GTR2) with a Smith masking-shadowing function. Burley calculated the anisotropic weights $\alpha\_x$ and $\alpha\_y$ with:
 
 $$\textit{aspect} = \sqrt{1 - 0.9 * \textit{anisotropic}}$$
 $$\alpha\_x = \textit{roughness}^2 / \textit{aspect}$$
@@ -131,7 +151,7 @@ Via the 2014 addendum to the course notes we know that Disney changed their geom
 
 $$G1\_{GTR\_2aniso} = \frac{1}{(\v \cdot \n) + \sqrt{(\alpha\_x  \v \cdot \x)^2 + (\alpha\_y  \v \cdot \y)^2 + (\v \cdot \n)^2}}$$
 
-For the specular BRDF they use the Schlick Fresnel approximation. More on that later though...
+In the code you can see I call the DisneyFresnel function to calculate the Fresnel term. I'll talk more about that later.
 
 ~~~~
 //===================================================================================================================
@@ -193,7 +213,7 @@ static float3 EvaluateDisneyBRDF(const SurfaceParameters& surface, const float3&
 }
 ~~~~
 
-You'll notice that in SeparableSmithGGXG1 I use a lot of trig functions (ex: Sin2Phi, TanTheta). I'm using the unoptimized implementation described in Understanding the Masking-Shadowing function. There exists an optimized form of this in the Disney BRDF explorer but that goes to infinity under some circumstances so I'm not convinced it's correct. If you know of a more optimal form of this please let me know.
+You'll notice that in SeparableSmithGGXG1 I use a lot of trig functions (ex: Sin2Phi, TanTheta). I'm using the unoptimized implementation described in [Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs](http://jcgt.org/published/0003/02/03/). There exists an optimized form of this in the Disney BRDF explorer but that goes to infinity under some circumstances so I'm not convinced it's correct. If you know of a more optimal form of this please let me know.
 
 ---
 Specular BSDF
@@ -306,7 +326,7 @@ Now let's describe how these terms are all brought together. The clearcoat lobe 
 
 _Diagram from 2015 paper._
 
-In this diagram you can see that the we blend between the specular transmission lobe and the dielectric BRDF based on the _specTrans_ parameter and then we blend that with the metallic lobe based on the _metallic_ parameter. But what is the dielectric BRDF? It's a combination of the Diffuse lobe with the Specular BRDF lobe. There's some tricky overlap here since the metallic BRDF also uses the same Specular BRDF lobe and we don't want to duplicate that effort. This is where that "DisneyFresnel" function that I used earlier and didn't describe comes in.
+In this diagram you can see that the we blend between the specular transmission lobe and the dielectric BRDF based on the _specTrans_ parameter and then we blend that with the metallic lobe based on the _metallic_ parameter. But what is the metallic BRDF and what is the dielectric BRDF? The metallic BRDF uses the specular BRDF lobe with the Schlick Fresnel term with the baseColor as R0. The dielectric BRDF is a combination of the Diffuse lobe with the Specular BRDF lobe where the specular BRDF lobe uses the Dielectric Fresnel equation. So what we end up with will be both the dielectric BRDF and the metallic BRDF both being evaluated with one function call and the DisneyFresnel function doing the work of blending between the two based on the _metallic_ and _specularTint_ surface parameters.
 
 ~~~
 //===================================================================================================================
@@ -328,8 +348,6 @@ static float3 DisneyFresnel(const SurfaceParameters& surface, const float3& wo, 
     return Lerp(float3(dielectricFresnel), metallicFresnel, surface.metallic);
 }
 ~~~
-
-By using this we can call the specular BRDF function once and handle the specular contributions from both the metallic and the dielectric lobes. You can see in the code comment that the sourcing for some of this is a bit nebulous so if anyone spots any mistakes here please holler.
 
 Now we have everything to evaluate a single surface interaction.
 
@@ -457,7 +475,7 @@ static void CalculateLobePdfs(const SurfaceParameters& surface,
 }
 ~~~
 
-And now sampling is relatively straightforward. [I already wrote a blog post about sampling the specular BRDF](https://schuttejoe.github.io/post/ggximportancesamplingpart2/) and sampling a cosine weighted hemisphere is sufficient for sampling the diffuse lobe. That leaves clearcoat for which Burley gave the equation for sampling the distribution of normals in the 2012 addendum:
+And now sampling is relatively straightforward. [I already wrote a blog post about sampling the specular BRDF](https://schuttejoe.github.io/post/ggximportancesamplingpart2/) and sampling a cosine weighted hemisphere is sufficient for sampling the diffuse BRDF. That leaves clearcoat for which Burley gave the equation for sampling the distribution of normals in the 2012 addendum:
 
 $$cos(\theta\_h) = \sqrt{\frac{1 - \xi\_2}{1 + (\alpha^2 - 1)\xi\_2}}$$
 
