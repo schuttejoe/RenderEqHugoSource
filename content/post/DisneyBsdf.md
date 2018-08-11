@@ -35,9 +35,9 @@ The title of my blog (Rendering Equations) wouldn't be a bad pun for giving you 
 Sheen
 ---
 
-The sheen lobe is probably the simplest of all of the terms so we'll start here. It is a standalone lobe that is added to the others based on a $\textit{sheen}$ parameter with its color varying between white and the base color depending on the $\textit{sheenTint}$ parameter. It's purpose is to model light at grazing angles on a surface so it will mostly be used for retro-reflection seen in cloth or on rougher surfaces to add back in energy lost due to a geometry term that only models single-scattering. I wouldn't be surprised to see this term be replaced with something like [Multiple-Scattering Microfacet BSDFs with the Smith Model](https://eheitzresearch.wordpress.com/240-2/) or [A Multi-Faceted Exploration (Part 2)](http://blog.selfshadow.com/2018/06/04/multi-faceted-part-2/) in Disney's future iterations though that would necessitate an alternate solution for retro-reflection where their diffuse term is insufficient.
+The sheen lobe is probably the simplest of all of the terms so we'll start here. It is a standalone lobe that is added to the others based on a $\textit{sheen}$ parameter with its color varying between white and the a tinted color depending on the $\textit{sheenTint}$ parameter. It's purpose is to model light at grazing angles on a surface so it will mostly be used for retro-reflection seen in cloth or on rougher surfaces to add back in energy lost due to a geometry term that only models single-scattering. I wouldn't be surprised to see this term be replaced with something like [Multiple-Scattering Microfacet BSDFs with the Smith Model](https://eheitzresearch.wordpress.com/240-2/) or [A Multi-Faceted Exploration (Part 2)](http://blog.selfshadow.com/2018/06/04/multi-faceted-part-2/) in Disney's future iterations though that would necessitate an alternate solution for retro-reflection where their diffuse term is insufficient.
 
-While I don't recall seeing it mentioned anywhere in the notes, in the [Disney BRDF Explorer](https://github.com/wdas/brdf) they extract the hue and saturation from the base color and use that for the sheen lobe's tint color rather than using the base color directly. This is done by calculating the luminance using approximate, linear-space CIE luminance weights and then normalizing the luminance:
+While I don't recall seeing it mentioned anywhere in the notes, in the [Disney BRDF Explorer](https://github.com/wdas/brdf) they extract the hue and saturation from the base color and use that for the sheen lobe's tint color rather than using the base color directly. This is done by calculating the luminance using approximate, linear-space CIE luminance weights and then normalizing:
 ~~~
 static float3 CalculateTint(float3 baseColor)
 {
@@ -74,7 +74,7 @@ Clearcoat
 
 The Clearcoat lobe is another additive lobe that is controlled by a $\textit{clearcoat}$ parameter for its intensity and a $\textit{clearcoatGloss}$ parameter for its shape. This lobe is a bit more complicated and models a full BRDF but most of its terms are fixed to keep this lobe as a simple, artist-friendly way to model, well, a clear... coating on top of a material. It's pretty well named.
 
-The distribution term used for the clearcoat layer is a fixed form of a BRDF created by Burley and called Generalized Trowbridge-Reitz. For those familiar with the model uses a fixed gamma of 1 to give it a long tail. Here is its normalized form used for clearcoat via Burley's course notes:
+The distribution term used for the clearcoat layer is a fixed form of a BRDF created by Burley and called Generalized Trowbridge-Reitz. Here is its normalized form with a fixed gamma of one used for clearcoat via Burley's course notes:
 
 $$D\_{GTR\_1}(x) = \frac{\alpha^2 - 1}{\pi\log(\alpha^2)} \frac{1}{1 + (\alpha^2 - 1)\cos^2\theta\_h}$$
 
@@ -82,7 +82,7 @@ The Fresnel term uses the Schlick approximation with a fixed index of refraction
 
 $$f\_{Schlick} = F\_0 + (1 - F\_0)(1 - \cos\theta\_h)^5$$
 
-The masking-shadowing term used was the separable form of Smith for GGX (aka GTR2) with a fixed roughness of 0.25. While the term is not the correct match for the distribution of normals as of the 2014 addendum to the 2012 course notes it looks like they were happy with the look and have not changed it.
+The masking-shadowing term used was the separable form of Smith for GGX with a fixed roughness of 0.25. While the term is not the correct match for the distribution of normals as of the 2014 addendum to the 2012 course notes it looks like they were happy with the look and have not changed it.
 
 $$G(\theta, \alpha) = \frac{1}{\cos\theta + \sqrt{\alpha^2 + \cos\theta - \alpha^2\cos^2\theta}}$$
 $$G(\theta\_l, \theta\_v) = G(\theta\_l, 0.25) * G(\theta\_v, 0.25)$$
@@ -149,7 +149,9 @@ $$D\_{GTR\_2aniso} = \frac{1}{\pi \alpha\_x \alpha\_y} \frac{1}{(\frac{(\h \cdot
 
 Via the 2014 addendum to the course notes we know that Disney changed their geometry term to match the anisotropic Smith GGX term derived by Heitz in [__Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs__](http://jcgt.org/published/0003/02/03/).
 
-$$G1\_{GTR\_2aniso} = \frac{1}{(\v \cdot \n) + \sqrt{(\alpha\_x  \v \cdot \x)^2 + (\alpha\_y  \v \cdot \y)^2 + (\v \cdot \n)^2}}$$
+$$G1\_{GTR\_2aniso} = \frac{1}{1 + \Lambda(\wo)}$$
+$$\Lambda(\wo) = \frac{-1 + \sqrt{1 + \frac{1}{a^2}}}{2}$$
+$$a = \frac{1}{\tan\theta\_o\sqrt{\cos^2\phi\_o\alpha\_x^2 + \sin^2\phi\_o\alpha\_y^2}}$$
 
 In the code you can see I call the DisneyFresnel function to calculate the Fresnel term. I'll talk more about that later.
 
@@ -213,7 +215,7 @@ static float3 EvaluateDisneyBRDF(const SurfaceParameters& surface, const float3&
 }
 ~~~~
 
-You'll notice that in SeparableSmithGGXG1 I use a lot of trig functions (ex: Sin2Phi, TanTheta). I'm using the unoptimized implementation described in [Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs](http://jcgt.org/published/0003/02/03/). There exists an optimized form of this in the Disney BRDF explorer but that goes to infinity under some circumstances so I'm not convinced it's correct. If you know of a more optimal form of this please let me know.
+You'll notice that in SeparableSmithGGXG1 I use a lot of trig functions (ex: Sin2Phi, TanTheta). I'm using the unoptimized implementation described in [Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs](http://jcgt.org/published/0003/02/03/). There exists an optimized form of this in the Disney BRDF explorer but that goes to infinity under some circumstances so I'm not convinced it's correct.
 
 ---
 Specular BSDF
@@ -234,8 +236,7 @@ Finally, when using the thin material model we use the square root of the base c
 static float ThinTransmissionRoughness(float ior, float roughness)
 {
     // -- Disney scales by (.65 * eta - .35) based on figure 15 of the 2015 PBR course notes. Based on their figure
-    // -- the results match a geometrically thin solid fairly well but it is odd to me that roughness is decreased
-    // -- until an IOR of just over 2.
+    // -- the results match a geometrically thin solid fairly well.
     return Saturate((0.65f * ior - 0.35f) * roughness);
 }
 
@@ -333,9 +334,9 @@ Bringing it all together
 
 Now let's describe how these terms are all brought together. The clearcoat lobe and the sheen lobe are both additive. The rest of the terms are described with this diagram from the 2015 PBR paper.
 
-_Diagram from 2015 paper._
+<center>![](/img/Posts/DisneyBsdf/Blending.png)</center>
 
-In this diagram you can see that the we blend between the specular transmission lobe and the dielectric BRDF based on the _specTrans_ parameter and then we blend that with the metallic lobe based on the _metallic_ parameter. But what is the metallic BRDF and what is the dielectric BRDF? The metallic BRDF uses the specular BRDF lobe with the Schlick Fresnel term with the baseColor as R0. The dielectric BRDF is a combination of the Diffuse lobe with the Specular BRDF lobe where the specular BRDF lobe uses the Dielectric Fresnel equation. So what we end up with will be both the dielectric BRDF and the metallic BRDF both being evaluated with one function call and the DisneyFresnel function doing the work of blending between the two based on the _metallic_ and _specularTint_ surface parameters.
+In this diagram you can see that we blend between the specular transmission lobe and the dielectric BRDF based on the _specTrans_ parameter and then we blend that with the metallic lobe based on the _metallic_ parameter. But what are the metallic and dielectric BRDFs in terms of the lobes I've described so far? The metallic BRDF uses the specular BRDF lobe with the Schlick Fresnel term with the baseColor as R0. The dielectric BRDF is a combination of the Diffuse lobe with the Specular BRDF lobe where the specular BRDF lobe uses the dielectric Fresnel equation. So what we end up with will be the specular part of both the dielectric BRDF and the metallic BRDF being evaluated with one function call and the DisneyFresnel function doing the work of blending between the two based on the _metallic_ and _specularTint_ surface parameters.
 
 ~~~
 //===================================================================================================================
